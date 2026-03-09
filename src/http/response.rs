@@ -77,7 +77,7 @@ impl HttpResponse {
         // convert the header into bytes
         let mut bytes = response.into_bytes();
 
-        // append body (already in bytes) if present
+        // append body (already in bytes)
         if let Some(body) = &self.body {
             bytes.extend_from_slice(body);
         }
