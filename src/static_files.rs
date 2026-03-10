@@ -1,5 +1,10 @@
 use crate::http::response::HttpResponse;
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 pub struct StaticFiles {
     root: PathBuf,
@@ -15,7 +20,7 @@ impl StaticFiles {
     pub async fn serve(&self, request_path: &str) -> Option<HttpResponse> {
         let file_path = self.resolve_path(request_path)?;
 
-        let bytes = tokio::fs::read(&file_path).await.ok()?;
+        let bytes = ReadFileFuture::new(file_path.clone()).await.ok()?;
 
         let content_type = infer_content_type(&file_path);
 
@@ -77,5 +82,55 @@ fn infer_content_type(path: &Path) -> &'static str {
 
         // fallback — tell the browser to download it :P
         _ => "application/octet-stream",
+    }
+}
+
+struct ReadFileFuture {
+    path: PathBuf,
+    result: Option<io::Result<Vec<u8>>>,
+    rx: Option<std::sync::mpsc::Receiver<io::Result<Vec<u8>>>>,
+}
+
+impl ReadFileFuture {
+    fn new(path: PathBuf) -> Self {
+        ReadFileFuture {
+            path,
+            result: None,
+            rx: None,
+        }
+    }
+}
+
+impl Future for ReadFileFuture {
+    type Output = io::Result<Vec<u8>>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.rx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let path = self.path.clone();
+            let waker = cx.waker().clone();
+
+            std::thread::spawn(move || {
+                let result = std::fs::read(&path);
+                let _ = tx.send(result);
+
+                waker.wake();
+            });
+
+            self.rx = Some(rx);
+            return Poll::Pending;
+        }
+
+        if let Some(rx) = &self.rx {
+            match rx.try_recv() {
+                Ok(result) => Poll::Ready(result),
+                Err(_) => {
+                    cx.waker().clone();
+                    Poll::Pending
+                }
+            }
+        } else {
+            Poll::Pending
+        }
     }
 }
